@@ -655,12 +655,8 @@ step_logrotate() {
 }
 EOF
 
-    cat > /etc/cron.d/remnawave-update << 'EOF'
-0 5 * * 6 root cd /opt/remnanode && docker compose pull -q && docker compose down && docker compose up -d >> /var/log/remnawave-update.log 2>&1
-EOF
-    chmod 644 /etc/cron.d/remnawave-update
 
-    log_success "Директории, logrotate, auto-update cron"
+    log_success "Директории, logrotate"
 }
 
 # ══════════════════════════════════════════════════════════════════
@@ -756,7 +752,7 @@ print_summary() {
     fi
     echo -e "  ✅ DNS over TLS"
     echo -e "  ✅ UFW + Fail2ban"
-    echo -e "  ✅ Logrotate + auto-update cron"
+    echo -e "  ✅ Logrotate"
     echo ""
     echo -e "${YELLOW}Проверка после ребута:${NC}"
     echo -e "  sysctl net.ipv4.tcp_congestion_control            # → bbr"
