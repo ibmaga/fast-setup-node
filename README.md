@@ -6,19 +6,55 @@
 
 ## ⚡ Быстрый старт
 
+### Полная настройка ВМ + деплой
+
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/ibmaga/fast-setting-node/main/node-setup.sh)
 ```
 
-Скрипт запросит:
+### Только деплой remnanode (без оптимизации)
+
+Быстро поднять контейнер для теста — пропускает всю оптимизацию, ставит Docker если нет, спрашивает только `NODE_PORT` и `SECRET_KEY`:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/ibmaga/fast-setting-node/main/node-setup.sh) --deploy-only
+```
+
+### Только применить sysctl (на работающий сервер)
+
+Применить kernel-тюнинг без переустановки пакетов и без ребута:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/ibmaga/fast-setting-node/main/node-setup.sh) --apply-only
+```
+
+## 🔀 Режимы работы
+
+| Режим | Флаг | Что делает |
+|-------|------|-----------|
+| **Полный** | *(без флагов)* | Обновление системы, Docker, sysctl, RPS, swap, UFW, fail2ban, DNS, logrotate + опционально деплой remnanode |
+| **Deploy only** | `--deploy-only` | Только Docker + docker-compose.yml + pull + запуск remnanode |
+| **Apply only** | `--apply-only` | Только sysctl/conntrack/RPS/limits на работающий сервер без ребута |
+
+## 📋 Что спрашивает скрипт
+
+### Полный режим
+
 - **Порты VLESS Reality** (через запятую, например: `443,8443,9443`)
 - **NODE_PORT** для API Remnawave (по умолчанию `2222`)
 - **IP панели Remnawave** — NODE_PORT будет открыт только для этого IP
 - **IP Prometheus** (опционально, для node_exporter)
 - **Swap** — да/нет (рекомендуется для защиты от OOM)
+- **Деплой remnanode** — да/нет, если да — запрашивает SECRET_KEY
 - **Reboot** — автоматически предложит перезагрузку в конце
 
-## 📋 Что настраивается
+### Deploy only
+
+- **NODE_PORT** (по умолчанию `2222`)
+- **SECRET_KEY** из панели Remnawave
+- **Reboot** — предложит, но не обязателен (контейнер уже работает)
+
+## 📋 Что настраивается (полный режим)
 
 | Компонент | Что делает |
 |-----------|-----------|
@@ -26,23 +62,24 @@ bash <(curl -fsSL https://raw.githubusercontent.com/ibmaga/fast-setting-node/mai
 | **sysctl** | TCP буферы, backlog, conntrack, keepalive |
 | **RPS** | Распределение пакетов по всем ядрам CPU |
 | **Swap** | Защита от OOM-kill (опционально, размер по RAM) |
-| **Conntrack** | Автоматический расчёт по RAM (262K–1M) |
+| **Conntrack** | Автоматический расчёт по RAM (131K–1M) |
 | **nofile** | Лимит файловых дескрипторов 1048576 |
 | **UFW** | Firewall с комментариями, NODE_PORT только для IP панели |
 | **Fail2ban** | Защита SSH от брутфорса |
 | **DNS over TLS** | Cloudflare + Google DoT |
 | **Docker** | Установка если отсутствует |
 | **Logrotate** | Ротация логов remnanode (50MB, 5 файлов) |
-| **Auto-update** | Cron обновления контейнера (суббота 05:00 UTC) |
+| **Remnanode** | Опционально: docker-compose.yml, pull, запуск |
 
 ## 🧮 Автоматические расчёты по RAM
 
 | RAM | Conntrack max | TCP buf max | Swap |
 |-----|--------------|-------------|------|
-| ≤4 ГБ | 262,144 | 8 МБ | 2 ГБ |
-| 5–8 ГБ | 524,288 | 16 МБ | 2 ГБ |
-| 9–16 ГБ | 524,288 | 16 МБ | 4 ГБ |
-| >16 ГБ | 1,048,576 | 16 МБ | 4 ГБ |
+| ≤2 ГБ | 131,072 | 8 МБ | 2 ГБ |
+| 3–4 ГБ | 262,144 | 16 МБ | 2 ГБ |
+| 5–8 ГБ | 524,288 | 25 МБ | 2 ГБ |
+| 9–16 ГБ | 524,288 | 32 МБ | 4 ГБ |
+| >16 ГБ | 1,048,576 | 32 МБ | 4 ГБ |
 
 ## 🔧 RPS (Receive Packet Steering)
 
@@ -56,14 +93,15 @@ bash <(curl -fsSL https://raw.githubusercontent.com/ibmaga/fast-setting-node/mai
 ## 📁 Что создаётся
 
 ```
-/opt/remnanode/                                # Директория для docker-compose.yml
-/var/log/remnanode/                            # Логи Xray
-/etc/sysctl.d/99-vpn-node.conf                # BBR, TCP буферы, conntrack
-/etc/sysctl.d/99-swap.conf                     # swappiness (если swap включён)
-/etc/security/limits.d/99-vpn-node.conf        # nofile limits
-/etc/systemd/system/rps-tuning.service         # RPS persistent
-/etc/logrotate.d/remnanode                     # Ротация логов
-/etc/cron.d/remnawave-update                   # Автообновление ноды
+/opt/remnanode/
+│   └── docker-compose.yml             # Если выбран деплой remnanode
+/opt/remnawave/xray/share/
+│   └── zapret.dat                      # Если выбран деплой remnanode
+/var/log/remnanode/                     # Логи Xray
+/etc/sysctl.d/99-vpn-node.conf         # BBR, TCP буферы, conntrack
+/etc/security/limits.d/99-vpn-node.conf # nofile limits
+/etc/systemd/system/rps-tuning.service  # RPS persistent
+/etc/logrotate.d/remnanode              # Ротация логов
 ```
 
 ## ✅ Проверка после ребута
@@ -71,30 +109,46 @@ bash <(curl -fsSL https://raw.githubusercontent.com/ibmaga/fast-setting-node/mai
 ```bash
 sysctl net.ipv4.tcp_congestion_control          # → bbr
 sysctl net.netfilter.nf_conntrack_max            # → 524288
+sysctl net.netfilter.nf_conntrack_tcp_timeout_established  # → 600
+cat /sys/module/nf_conntrack/parameters/hashsize # → 131072
 cat /sys/class/net/eth0/queues/rx-0/rps_cpus     # → f (4 ядра) или ff (8 ядер)
 ulimit -n                                         # → 1048576
 swapon --show                                     # → /swapfile (если включён)
 ufw status                                        # → правила на месте
+docker ps                                         # → remnanode (если деплоили)
+```
+
+## 🔧 Управление remnanode
+
+```bash
+# Логи
+docker compose -f /opt/remnanode/docker-compose.yml logs -f
+
+# Рестарт
+docker compose -f /opt/remnanode/docker-compose.yml restart
+
+# Обновление образа
+docker compose -f /opt/remnanode/docker-compose.yml pull
+docker compose -f /opt/remnanode/docker-compose.yml up -d
+
+# Обновление zapret.dat
+wget -O /opt/remnawave/xray/share/zapret.dat \
+    https://github.com/kutovoys/ru_gov_zapret/releases/latest/download/zapret.dat
+docker compose -f /opt/remnanode/docker-compose.yml restart
 ```
 
 ## ⚠️ Важно
 
 - Поддерживается **только Ubuntu/Debian**
 - Требуется **root** доступ
-- В конце скрипт предложит **reboot** — для полного применения настроек ребут обязателен
-- Скрипт **не устанавливает** Remnawave Node — только подготавливает ВМ
-- `Automatic-Reboot` в unattended-upgrades **не включается** (опасно для VPN)
+- В полном режиме скрипт предложит **reboot** — для полного применения настроек ребут обязателен
+- В `--deploy-only` ребут не обязателен — контейнер уже запущен
+- `--apply-only` не требует ребута — всё применяется сразу
 - Access log Xray **не рекомендуется** для production (гигабайты записей)
 
 ## 🔄 Повторный запуск
 
-Скрипт можно запускать повторно. UFW сбрасывается и создаётся заново, sysctl конфиги перезаписываются без дублирования.
-
-## 📚 После настройки и ребута
-
-1. Создайте ноду в панели Remnawave
-2. Скопируйте `docker-compose.yml` в `/opt/remnanode/`
-3. Запустите: `cd /opt/remnanode && docker compose up -d`
+Скрипт можно запускать повторно. В полном режиме UFW сбрасывается и создаётся заново, sysctl конфиги перезаписываются без дублирования. `--deploy-only` перезапишет docker-compose.yml и пересоздаст контейнер.
 
 ## 📝 Лицензия
 
