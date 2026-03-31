@@ -2,10 +2,11 @@
 # ╔══════════════════════════════════════════════════════════════════╗
 # ║  VPN Node Setup — Оптимизация ВМ для Remnawave/Xray            ║
 # ║  Автор: ibmaga                                                   ║
-# ║  Версия: 2.0.0                                                  ║
+# ║  Версия: 2.1.0                                                  ║
 # ║                                                                  ║
 # ║  Включает: BBR, sysctl tuning, RPS, swap, conntrack+timeouts,  ║
-# ║  hashsize, UFW, fail2ban, DNS over TLS, logrotate, txqueuelen  ║
+# ║  hashsize, UFW, fail2ban, DNS over TLS, logrotate, txqueuelen, ║
+# ║  опциональный деплой remnanode                                   ║
 # ╚══════════════════════════════════════════════════════════════════╝
 
 set -euo pipefail
@@ -26,8 +27,10 @@ log_error()   { echo -e "${RED}❌ $*${NC}" >&2; }
 log_step()    { echo -e "\n${CYAN}━━━ $* ━━━${NC}\n"; }
 
 # ── Режим работы ──────────────────────────────────────────────────
-# APPLY_ONLY=true — только применить sysctl на работающем сервере
+# APPLY_ONLY=true  — только применить sysctl на работающем сервере
+# DEPLOY_ONLY=true — только развернуть remnanode (без оптимизации)
 APPLY_ONLY="${APPLY_ONLY:-false}"
+DEPLOY_ONLY="${DEPLOY_ONLY:-false}"
 
 # ── Проверки ──────────────────────────────────────────────────────
 check_root() {
@@ -199,7 +202,7 @@ validate_port() {
 interactive_setup() {
     echo -e "${CYAN}"
     echo "╔══════════════════════════════════════════════════════╗"
-    echo "║       VPN Node Setup v2.0 — Настройка ВМ            ║"
+    echo "║       VPN Node Setup v2.1 — Настройка ВМ            ║"
     echo "╚══════════════════════════════════════════════════════╝"
     echo -e "${NC}"
 
@@ -299,6 +302,23 @@ interactive_setup() {
     fi
     echo ""
 
+    # ── Деплой remnanode ──
+    echo -e "${WHITE}Создать docker-compose.yml и запустить remnanode? (y/n, Enter = n):${NC}"
+    read -rp "Деплой remnanode: " DEPLOY_INPUT
+    DEPLOY_REMNANODE=false
+    SECRET_KEY=""
+    if [[ "$DEPLOY_INPUT" =~ ^[Yy]$ ]]; then
+        DEPLOY_REMNANODE=true
+        echo -e "${WHITE}Введите SECRET_KEY из панели Remnawave:${NC}"
+        read -rp "SECRET_KEY: " SECRET_KEY
+        if [[ -z "$SECRET_KEY" ]]; then
+            log_error "SECRET_KEY не может быть пустым"
+            exit 1
+        fi
+        log_success "Remnanode будет развёрнут с NODE_PORT=$NODE_PORT"
+    fi
+    echo ""
+
     # ── Подтверждение ──
     echo -e "${CYAN}━━━ Итоговые настройки ━━━${NC}"
     echo ""
@@ -311,6 +331,11 @@ interactive_setup() {
         echo -e "  Swap:             ${GREEN}$(calc_swap_size "$ram_gb")${NC}"
     else
         echo -e "  Swap:             ${YELLOW}пропущен${NC}"
+    fi
+    if [[ "$DEPLOY_REMNANODE" == "true" ]]; then
+        echo -e "  Remnanode:        ${GREEN}будет развёрнут${NC}"
+    else
+        echo -e "  Remnanode:        ${YELLOW}пропущен${NC}"
     fi
     echo ""
     echo -e "  ${WHITE}── Kernel parameters ──${NC}"
@@ -343,7 +368,7 @@ interactive_setup() {
 # ══════════════════════════════════════════════════════════════════
 
 step_system_update() {
-    log_step "1/9 — Обновление системы"
+    log_step "1/10 — Обновление системы"
     apt-get update -qq
     DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -qq
     apt-get install -y -qq curl wget mc htop btop iftop logrotate fail2ban ufw \
@@ -352,7 +377,7 @@ step_system_update() {
 }
 
 step_docker() {
-    log_step "2/9 — Docker"
+    log_step "2/10 — Docker"
     if command -v docker &>/dev/null; then
         log_success "Docker уже установлен: $(docker --version)"
     else
@@ -363,7 +388,7 @@ step_docker() {
 }
 
 step_sysctl() {
-    log_step "3/9 — Оптимизация ядра (sysctl)"
+    log_step "3/10 — Оптимизация ядра (sysctl)"
 
     local conntrack_max tcp_buf_max hashsize tw_buckets netdev_budget dev_weight
     conntrack_max=$(calc_conntrack_max "$RAM_GB")
@@ -392,7 +417,7 @@ step_sysctl() {
 
     cat > /etc/sysctl.d/99-vpn-node.conf << EOF
 # ── VPN Node Optimization ─────────────────────────────────────────
-# Сгенерировано vpn-node-setup.sh v2.0 ($(date +%Y-%m-%d))
+# Сгенерировано vpn-node-setup.sh v2.1 ($(date +%Y-%m-%d))
 # Сервер: RAM=${RAM_GB}GB, CPU=${CPUS} cores
 # ─────────────────────────────────────────────────────────────────
 
@@ -473,7 +498,7 @@ EOF
 }
 
 step_limits() {
-    log_step "4/9 — Лимиты (nofile, systemd)"
+    log_step "4/10 — Лимиты (nofile, systemd)"
 
     cat > /etc/security/limits.d/99-vpn-node.conf << 'EOF'
 * soft nofile 1048576
@@ -499,7 +524,7 @@ EOF
 }
 
 step_rps() {
-    log_step "5/9 — RPS + txqueuelen"
+    log_step "5/10 — RPS + txqueuelen"
 
     local rps_mask queues_dir txqueuelen
     rps_mask=$(calc_rps_mask "$CPUS")
@@ -567,13 +592,13 @@ EOF
 
 step_swap() {
     if [[ "${SETUP_SWAP}" != "true" ]]; then
-        log_step "6/9 — Swap (пропущен)"
+        log_step "6/10 — Swap (пропущен)"
         # swappiness применяем в любом случае
         sysctl -w vm.swappiness=10 >/dev/null 2>&1 || true
         return 0
     fi
 
-    log_step "6/9 — Swap"
+    log_step "6/10 — Swap"
 
     if swapon --show | grep -q '/'; then
         log_success "Swap уже настроен: $(swapon --show --noheadings | awk '{print $1, $3}')"
@@ -596,7 +621,7 @@ step_swap() {
 }
 
 step_dns() {
-    log_step "7/9 — DNS over TLS"
+    log_step "7/10 — DNS over TLS"
 
     cat > /etc/systemd/resolved.conf << 'EOF'
 [Resolve]
@@ -610,7 +635,7 @@ EOF
 }
 
 step_firewall() {
-    log_step "8/9 — Firewall (UFW) + Fail2ban"
+    log_step "8/10 — Firewall (UFW) + Fail2ban"
 
     ufw --force reset >/dev/null 2>&1
     ufw default deny incoming >/dev/null 2>&1
@@ -639,7 +664,7 @@ step_firewall() {
 }
 
 step_logrotate() {
-    log_step "9/9 — Директории и логирование"
+    log_step "9/10 — Директории и логирование"
 
     mkdir -p /opt/remnanode /var/log/remnanode
 
@@ -655,8 +680,139 @@ step_logrotate() {
 }
 EOF
 
-
     log_success "Директории, logrotate"
+}
+
+step_remnanode() {
+    if [[ "${DEPLOY_REMNANODE}" != "true" ]]; then
+        log_step "10/10 — Remnanode (пропущен)"
+        return 0
+    fi
+
+    log_step "10/10 — Деплой Remnanode"
+
+    local REMNANODE_DIR="/opt/remnanode"
+    mkdir -p "${REMNANODE_DIR}"
+
+    # ── Скачиваем zapret.dat ─────────────────────────────────────
+    log_info "Скачиваю zapret.dat..."
+    mkdir -p /opt/remnawave/xray/share
+    wget -q -O /opt/remnawave/xray/share/zapret.dat \
+        https://github.com/kutovoys/ru_gov_zapret/releases/latest/download/zapret.dat \
+        && log_success "zapret.dat скачан" \
+        || log_warning "Не удалось скачать zapret.dat — продолжаю без него"
+
+    # ── Создаём docker-compose.yml ───────────────────────────────
+    cat > "${REMNANODE_DIR}/docker-compose.yml" << EOF
+services:
+  remnanode:
+    container_name: remnanode
+    hostname: remnanode
+    image: remnawave/node:latest
+    network_mode: host
+    restart: always
+    cap_add:
+      - NET_ADMIN
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
+    environment:
+      - NODE_PORT=${NODE_PORT}
+      - SECRET_KEY=${SECRET_KEY}
+    volumes:
+      - /var/log/remnanode:/var/log/remnanode
+      - /opt/remnawave/xray/share/zapret.dat:/usr/local/bin/zapret.dat
+EOF
+
+    log_success "docker-compose.yml → ${REMNANODE_DIR}/docker-compose.yml"
+
+    # ── Pull и запуск ────────────────────────────────────────────
+    log_info "Pulling remnawave/node:latest..."
+    cd "${REMNANODE_DIR}"
+    docker compose pull -q
+    log_success "Image pulled"
+
+    log_info "Запускаю remnanode..."
+    docker compose up -d
+    sleep 3
+
+    if docker ps --format '{{.Names}}' | grep -q '^remnanode$'; then
+        log_success "remnanode запущен и работает"
+    else
+        log_warning "remnanode контейнер не найден в docker ps — проверьте логи:"
+        log_warning "  docker compose -f ${REMNANODE_DIR}/docker-compose.yml logs"
+    fi
+}
+
+# ══════════════════════════════════════════════════════════════════
+#  DEPLOY ONLY — только развернуть remnanode без оптимизации
+# ══════════════════════════════════════════════════════════════════
+
+deploy_only_mode() {
+    echo -e "${CYAN}"
+    echo "╔══════════════════════════════════════════════════════╗"
+    echo "║   Быстрый деплой Remnanode (без оптимизации ВМ)     ║"
+    echo "╚══════════════════════════════════════════════════════╝"
+    echo -e "${NC}"
+
+    # ── Docker ───────────────────────────────────────────────────
+    if ! command -v docker &>/dev/null; then
+        log_info "Docker не найден, устанавливаю..."
+        apt-get update -qq
+        apt-get install -y -qq curl wget >/dev/null 2>&1
+        curl -fsSL https://get.docker.com | sh >/dev/null 2>&1
+        systemctl enable docker >/dev/null 2>&1
+        log_success "Docker установлен: $(docker --version)"
+    else
+        log_success "Docker: $(docker --version)"
+    fi
+
+    # ── NODE_PORT ────────────────────────────────────────────────
+    echo -e "${WHITE}NODE_PORT для API Remnawave (Enter = 2222):${NC}"
+    read -rp "NODE_PORT: " NODE_PORT_INPUT
+    NODE_PORT=${NODE_PORT_INPUT:-2222}
+
+    if ! validate_port "$NODE_PORT"; then
+        log_error "Невалидный NODE_PORT: $NODE_PORT"
+        exit 1
+    fi
+
+    # ── SECRET_KEY ───────────────────────────────────────────────
+    echo -e "${WHITE}Введите SECRET_KEY из панели Remnawave:${NC}"
+    read -rp "SECRET_KEY: " SECRET_KEY
+    if [[ -z "$SECRET_KEY" ]]; then
+        log_error "SECRET_KEY не может быть пустым"
+        exit 1
+    fi
+    echo ""
+
+    # ── Деплой ───────────────────────────────────────────────────
+    DEPLOY_REMNANODE=true
+    mkdir -p /opt/remnanode /var/log/remnanode
+    step_remnanode
+
+    echo ""
+    echo -e "${GREEN}╔══════════════════════════════════════════════════════╗${NC}"
+    echo -e "${GREEN}║       ✅ Remnanode развёрнут и запущен!              ║${NC}"
+    echo -e "${GREEN}╚══════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    echo -e "${YELLOW}Управление:${NC}"
+    echo -e "  docker compose -f /opt/remnanode/docker-compose.yml logs -f"
+    echo -e "  docker compose -f /opt/remnanode/docker-compose.yml restart"
+    echo ""
+    echo -e "${YELLOW}⚠️  Оптимизация ВМ не применялась.${NC}"
+    echo -e "${YELLOW}   Для полной настройки запустите скрипт без --deploy-only${NC}"
+    echo ""
+
+    read -rp "Перезагрузить сервер сейчас? (y/n): " REBOOT_CONFIRM
+    if [[ "$REBOOT_CONFIRM" =~ ^[Yy]$ ]]; then
+        log_info "Перезагрузка через 5 секунд..."
+        sleep 5
+        reboot
+    else
+        log_warning "Контейнер уже работает, ребут не обязателен"
+    fi
 }
 
 # ══════════════════════════════════════════════════════════════════
@@ -753,6 +909,15 @@ print_summary() {
     echo -e "  ✅ DNS over TLS"
     echo -e "  ✅ UFW + Fail2ban"
     echo -e "  ✅ Logrotate"
+    if [[ "${DEPLOY_REMNANODE}" == "true" ]]; then
+        echo -e "  ✅ Remnanode развёрнут и запущен"
+        echo -e "     docker-compose.yml → /opt/remnanode/"
+        echo -e "     zapret.dat → /opt/remnawave/xray/share/"
+    fi
+    echo ""
+    echo -e "${YELLOW}Управление remnanode:${NC}"
+    echo -e "  docker compose -f /opt/remnanode/docker-compose.yml logs -f"
+    echo -e "  docker compose -f /opt/remnanode/docker-compose.yml restart"
     echo ""
     echo -e "${YELLOW}Проверка после ребута:${NC}"
     echo -e "  sysctl net.ipv4.tcp_congestion_control            # → bbr"
@@ -778,8 +943,31 @@ print_summary() {
 # ══════════════════════════════════════════════════════════════════
 
 main() {
+    # ── Парсинг аргументов ───────────────────────────────────────
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --deploy-only)
+                DEPLOY_ONLY=true
+                shift
+                ;;
+            --apply-only)
+                APPLY_ONLY=true
+                shift
+                ;;
+            *)
+                shift
+                ;;
+        esac
+    done
+
     check_root
     check_os
+
+    # Режим deploy-only — только развернуть remnanode
+    if [[ "${DEPLOY_ONLY}" == "true" ]]; then
+        deploy_only_mode
+        exit 0
+    fi
 
     # Режим apply-only — только sysctl на работающий сервер
     if [[ "${APPLY_ONLY}" == "true" ]]; then
@@ -799,6 +987,7 @@ main() {
     step_dns
     step_firewall
     step_logrotate
+    step_remnanode
 
     print_summary
 }
