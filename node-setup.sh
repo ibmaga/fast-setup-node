@@ -790,6 +790,21 @@ deploy_only_mode() {
     # ── Деплой ───────────────────────────────────────────────────
     DEPLOY_REMNANODE=true
     mkdir -p /opt/remnanode /var/log/remnanode
+
+    # ── Logrotate для remnanode ──────────────────────────────────
+    cat > /etc/logrotate.d/remnanode << 'EOF'
+/var/log/remnanode/*.log {
+    daily
+    maxsize 50M
+    rotate 5
+    compress
+    missingok
+    notifempty
+    copytruncate
+}
+EOF
+    log_success "Logrotate для remnanode настроен"
+
     step_remnanode
 
     echo ""
