@@ -208,6 +208,19 @@ validate_port() {
     return 1
 }
 
+# Принимает одиночный порт (N) или диапазон (N:M, N<M) — для UDP port hopping
+validate_udp_entry() {
+    local e=$1
+    if [[ $e =~ ^[0-9]+$ ]]; then
+        validate_port "$e"
+        return $?
+    elif [[ $e =~ ^[0-9]+:[0-9]+$ ]]; then
+        local lo=${e%%:*} hi=${e##*:}
+        validate_port "$lo" && validate_port "$hi" && (( lo < hi )) && return 0
+    fi
+    return 1
+}
+
 # ══════════════════════════════════════════════════════════════════
 #  ИНТЕРАКТИВНЫЙ ВВОД
 # ══════════════════════════════════════════════════════════════════
@@ -272,6 +285,27 @@ interactive_setup() {
         exit 1
     fi
     log_success "Порты VLESS: ${VLESS_PORTS[*]}"
+    echo ""
+
+    # ── UDP-порты Hysteria2 (опционально) ──
+    echo -e "${WHITE}UDP-порты Hysteria2 (Enter = нет; через запятую, поддержка диапазона):${NC}"
+    echo -e "${YELLOW}  Пример: 443  |  36712  |  20000:50000 (port hopping)${NC}"
+    read -rp "UDP-порты: " HYSTERIA_PORTS_INPUT
+
+    HYSTERIA_PORTS=()
+    if [[ -n "$HYSTERIA_PORTS_INPUT" ]]; then
+        IFS=',' read -ra HY_ARRAY <<< "$HYSTERIA_PORTS_INPUT"
+        for p in "${HY_ARRAY[@]}"; do
+            p=$(echo "$p" | tr -d ' ')
+            if validate_udp_entry "$p"; then
+                HYSTERIA_PORTS+=("$p")
+            else
+                log_error "Невалидный UDP-порт/диапазон: $p"
+                exit 1
+            fi
+        done
+        log_success "UDP Hysteria2: ${HYSTERIA_PORTS[*]}"
+    fi
     echo ""
 
     # ── NODE_PORT (API Remnawave) ──
@@ -351,6 +385,9 @@ interactive_setup() {
     echo -e "  Интерфейс:        ${GREEN}$iface${NC}  (txqueuelen → $txqueuelen)"
     echo -e "  CPU / RAM:        ${GREEN}${cpus} ядер / ${ram_gb} ГБ${NC}"
     echo -e "  VLESS порты:      ${GREEN}${VLESS_PORTS[*]}${NC}"
+    if [[ ${#HYSTERIA_PORTS[@]} -gt 0 ]]; then
+        echo -e "  Hysteria2 UDP:    ${GREEN}${HYSTERIA_PORTS[*]}${NC}"
+    fi
     echo -e "  NODE_PORT:        ${GREEN}$NODE_PORT (только $MASTER_IP)${NC}"
     echo -e "  Prometheus:       ${GREEN}${PROMETHEUS_IP:-не установлен}${NC}"
     if [[ -n "$PROMETHEUS_IP" ]]; then
@@ -676,6 +713,13 @@ step_firewall() {
     for port in "${VLESS_PORTS[@]}"; do
         ufw allow "$port"/tcp comment 'VLESS Reality' >/dev/null 2>&1
     done
+
+    if [[ ${#HYSTERIA_PORTS[@]} -gt 0 ]]; then
+        for uport in "${HYSTERIA_PORTS[@]}"; do
+            ufw allow "$uport"/udp comment 'Hysteria2' >/dev/null 2>&1
+        done
+        log_success "UFW: Hysteria2 UDP(${HYSTERIA_PORTS[*]})"
+    fi
 
     ufw allow from "$MASTER_IP" to any port "$NODE_PORT" proto tcp comment 'Remnanode API' >/dev/null 2>&1
 
@@ -1072,6 +1116,9 @@ print_summary() {
     fi
     echo -e "  ✅ DNS over TLS"
     echo -e "  ✅ UFW + Fail2ban"
+    if [[ ${#HYSTERIA_PORTS[@]} -gt 0 ]]; then
+        echo -e "  ✅ UFW: Hysteria2 UDP (${HYSTERIA_PORTS[*]})"
+    fi
     if [[ -n "${PROMETHEUS_IP:-}" ]]; then
         echo -e "  ✅ node_exporter v${NODE_EXPORTER_VERSION} (TLS, порт ${NODE_EXPORTER_PORT})"
     fi
