@@ -44,7 +44,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/ibmaga/fast-setting-node/mai
 - **NODE_PORT** для API Remnawave (по умолчанию `2222`)
 - **IP панели Remnawave** — NODE_PORT будет открыт только для этого IP
 - **IP Prometheus** (опционально) — если указан, ставится node_exporter с TLS и открывается UFW только для этого IP
-- **Порт node_exporter** (спрашивается только если указан IP Prometheus; по умолчанию `9101` для VK Cloud, `9100` для остальных)
+- **Порт node_exporter** (спрашивается только если указан IP Prometheus; по умолчанию `9101`)
 - **Swap** — да/нет (рекомендуется для защиты от OOM)
 - **Деплой remnanode** — да/нет, если да — запрашивает SECRET_KEY
 - **Reboot** — автоматически предложит перезагрузку в конце
