@@ -43,7 +43,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/ibmaga/fast-setting-node/mai
 - **Порты VLESS Reality** (через запятую, например: `443,8443,9443`)
 - **NODE_PORT** для API Remnawave (по умолчанию `2222`)
 - **IP панели Remnawave** — NODE_PORT будет открыт только для этого IP
-- **IP Prometheus** (опционально, для node_exporter)
+- **IP Prometheus** (опционально) — если указан, ставится node_exporter с TLS и открывается UFW только для этого IP
+- **Порт node_exporter** (спрашивается только если указан IP Prometheus; по умолчанию `9101` для VK Cloud, `9100` для остальных)
 - **Swap** — да/нет (рекомендуется для защиты от OOM)
 - **Деплой remnanode** — да/нет, если да — запрашивает SECRET_KEY
 - **Reboot** — автоматически предложит перезагрузку в конце
@@ -68,8 +69,9 @@ bash <(curl -fsSL https://raw.githubusercontent.com/ibmaga/fast-setting-node/mai
 | **Fail2ban** | Защита SSH от брутфорса |
 | **DNS over TLS** | Cloudflare + Google DoT |
 | **Docker** | Установка если отсутствует |
+| **node_exporter** | Опционально: v1.11.1, TLS (self-signed), systemd, порт 9101 |
 | **Logrotate** | Ротация логов remnanode (50MB, 5 файлов) |
-| **Remnanode** | Опционально: docker-compose.yml, pull, запуск |
+| **Remnanode** | Опционально: docker-compose.yml (+volumes сертификатов и сокетов), pull, запуск |
 
 ## 🧮 Автоматические расчёты по RAM
 
@@ -94,7 +96,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/ibmaga/fast-setting-node/mai
 
 ```
 /opt/remnanode/
-│   └── docker-compose.yml             # Если выбран деплой remnanode
+│   └── docker-compose.yml             # Деплой remnanode (+volumes: /dev/shm, /opt/nginx:ro)
 /opt/remnawave/xray/share/
 │   └── zapret.dat                      # Если выбран деплой remnanode
 /var/log/remnanode/                     # Логи Xray
@@ -102,6 +104,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/ibmaga/fast-setting-node/mai
 /etc/security/limits.d/99-vpn-node.conf # nofile limits
 /etc/systemd/system/rps-tuning.service  # RPS persistent
 /etc/logrotate.d/remnanode              # Ротация логов
+/etc/node_exporter/                     # Бинарь TLS: cert + key + web-config.yml (если указан Prometheus)
+/etc/systemd/system/node_exporter.service
 ```
 
 ## ✅ Проверка после ребута
@@ -116,6 +120,8 @@ ulimit -n                                         # → 1048576
 swapon --show                                     # → /swapfile (если включён)
 ufw status                                        # → правила на месте
 docker ps                                         # → remnanode (если деплоили)
+systemctl status node_exporter                    # → active (если указан Prometheus IP)
+curl -sk https://localhost:9101/metrics | head    # → метрики node_exporter
 ```
 
 ## 🔧 Управление remnanode
