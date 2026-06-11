@@ -2,11 +2,15 @@
 # ╔══════════════════════════════════════════════════════════════════╗
 # ║  VPN Node Setup — Оптимизация ВМ для Remnawave/Xray            ║
 # ║  Автор: ibmaga                                                   ║
-# ║  Версия: 2.1.0                                                  ║
+# ║  Версия: 2.2.0                                                  ║
 # ║                                                                  ║
 # ║  Включает: BBR, sysctl tuning, RPS, swap, conntrack+timeouts,  ║
 # ║  hashsize, UFW, fail2ban, DNS over TLS, logrotate, txqueuelen, ║
-# ║  опциональный деплой remnanode                                   ║
+# ║  node_exporter (TLS), опциональный деплой remnanode             ║
+# ║                                                                  ║
+# ║  v2.2.0: docker-compose volumes для сертификатов (/opt/nginx)  ║
+# ║  и unix-сокетов (/dev/shm); встроенная установка node_exporter ║
+# ║  с TLS (self-signed) на порту 9101                              ║
 # ╚══════════════════════════════════════════════════════════════════╝
 
 set -euo pipefail
@@ -31,6 +35,15 @@ log_step()    { echo -e "\n${CYAN}━━━ $* ━━━${NC}\n"; }
 # DEPLOY_ONLY=true — только развернуть remnanode (без оптимизации)
 APPLY_ONLY="${APPLY_ONLY:-false}"
 DEPLOY_ONLY="${DEPLOY_ONLY:-false}"
+
+# ── Конфигурация node_exporter / путей ────────────────────────────
+NODE_EXPORTER_VERSION="${NODE_EXPORTER_VERSION:-1.11.1}"
+NODE_EXPORTER_PORT_DEFAULT="9101"   # VK Cloud: 9100 занят на уровне ОС
+NODE_EXPORTER_DIR="/etc/node_exporter"
+# Директория unix-сокетов (HAProxy на хосте ↔ Xray в контейнере)
+SOCKET_DIR="/dev/shm"
+# Директория сертификатов (Hysteria2 / Reality own-cert, acme.sh)
+CERT_DIR="/opt/nginx"
 
 # ── Проверки ──────────────────────────────────────────────────────
 check_root() {
@@ -284,12 +297,25 @@ interactive_setup() {
     echo ""
 
     # ── Prometheus ──
-    echo -e "${WHITE}IP Prometheus для node_exporter (Enter = пропустить):${NC}"
+    echo -e "${WHITE}IP Prometheus для node_exporter (Enter = пропустить установку):${NC}"
     read -rp "IP Prometheus: " PROMETHEUS_IP
 
     if [[ -n "$PROMETHEUS_IP" ]] && ! validate_ip "$PROMETHEUS_IP"; then
         log_error "Невалидный IP: $PROMETHEUS_IP"
         exit 1
+    fi
+
+    # Порт node_exporter спрашиваем только если будем ставить
+    NODE_EXPORTER_PORT="$NODE_EXPORTER_PORT_DEFAULT"
+    if [[ -n "$PROMETHEUS_IP" ]]; then
+        echo -e "${WHITE}Порт node_exporter (Enter = ${NODE_EXPORTER_PORT_DEFAULT}, VK Cloud):${NC}"
+        echo -e "${YELLOW}  На обычных провайдерах ставь 9100; на VK Cloud — 9101${NC}"
+        read -rp "Порт: " NE_PORT_INPUT
+        NODE_EXPORTER_PORT=${NE_PORT_INPUT:-$NODE_EXPORTER_PORT_DEFAULT}
+        if ! validate_port "$NODE_EXPORTER_PORT"; then
+            log_error "Невалидный порт node_exporter: $NODE_EXPORTER_PORT"
+            exit 1
+        fi
     fi
     echo ""
 
@@ -327,6 +353,9 @@ interactive_setup() {
     echo -e "  VLESS порты:      ${GREEN}${VLESS_PORTS[*]}${NC}"
     echo -e "  NODE_PORT:        ${GREEN}$NODE_PORT (только $MASTER_IP)${NC}"
     echo -e "  Prometheus:       ${GREEN}${PROMETHEUS_IP:-не установлен}${NC}"
+    if [[ -n "$PROMETHEUS_IP" ]]; then
+        echo -e "  node_exporter:    ${GREEN}v${NODE_EXPORTER_VERSION}, TLS, порт ${NODE_EXPORTER_PORT} (→ $PROMETHEUS_IP)${NC}"
+    fi
     if [[ "$SETUP_SWAP" == "true" ]]; then
         echo -e "  Swap:             ${GREEN}$(calc_swap_size "$ram_gb")${NC}"
     else
@@ -368,16 +397,17 @@ interactive_setup() {
 # ══════════════════════════════════════════════════════════════════
 
 step_system_update() {
-    log_step "1/10 — Обновление системы"
+    log_step "1/11 — Обновление системы"
     apt-get update -qq
     DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -qq
     apt-get install -y -qq curl wget mc htop btop iftop logrotate fail2ban ufw \
+        openssl tar ethtool \
         >/dev/null 2>&1
     log_success "Система обновлена, пакеты установлены"
 }
 
 step_docker() {
-    log_step "2/10 — Docker"
+    log_step "2/11 — Docker"
     if command -v docker &>/dev/null; then
         log_success "Docker уже установлен: $(docker --version)"
     else
@@ -388,7 +418,7 @@ step_docker() {
 }
 
 step_sysctl() {
-    log_step "3/10 — Оптимизация ядра (sysctl)"
+    log_step "3/11 — Оптимизация ядра (sysctl)"
 
     local conntrack_max tcp_buf_max hashsize tw_buckets netdev_budget dev_weight
     conntrack_max=$(calc_conntrack_max "$RAM_GB")
@@ -498,7 +528,7 @@ EOF
 }
 
 step_limits() {
-    log_step "4/10 — Лимиты (nofile, systemd)"
+    log_step "4/11 — Лимиты (nofile, systemd)"
 
     cat > /etc/security/limits.d/99-vpn-node.conf << 'EOF'
 * soft nofile 1048576
@@ -524,7 +554,7 @@ EOF
 }
 
 step_rps() {
-    log_step "5/10 — RPS + txqueuelen"
+    log_step "5/11 — RPS + txqueuelen"
 
     local rps_mask queues_dir txqueuelen
     rps_mask=$(calc_rps_mask "$CPUS")
@@ -592,13 +622,13 @@ EOF
 
 step_swap() {
     if [[ "${SETUP_SWAP}" != "true" ]]; then
-        log_step "6/10 — Swap (пропущен)"
+        log_step "6/11 — Swap (пропущен)"
         # swappiness применяем в любом случае
         sysctl -w vm.swappiness=10 >/dev/null 2>&1 || true
         return 0
     fi
 
-    log_step "6/10 — Swap"
+    log_step "6/11 — Swap"
 
     if swapon --show | grep -q '/'; then
         log_success "Swap уже настроен: $(swapon --show --noheadings | awk '{print $1, $3}')"
@@ -621,7 +651,7 @@ step_swap() {
 }
 
 step_dns() {
-    log_step "7/10 — DNS over TLS"
+    log_step "7/11 — DNS over TLS"
 
     cat > /etc/systemd/resolved.conf << 'EOF'
 [Resolve]
@@ -635,7 +665,7 @@ EOF
 }
 
 step_firewall() {
-    log_step "8/10 — Firewall (UFW) + Fail2ban"
+    log_step "8/11 — Firewall (UFW) + Fail2ban"
 
     ufw --force reset >/dev/null 2>&1
     ufw default deny incoming >/dev/null 2>&1
@@ -650,8 +680,9 @@ step_firewall() {
     ufw allow from "$MASTER_IP" to any port "$NODE_PORT" proto tcp comment 'Remnanode API' >/dev/null 2>&1
 
     if [[ -n "${PROMETHEUS_IP:-}" ]]; then
-        ufw allow from "$PROMETHEUS_IP" to any port 9100 proto tcp comment 'Prometheus' >/dev/null 2>&1
-        ufw allow from "$PROMETHEUS_IP" to any port 9101 proto tcp comment 'Prometheus TLS' >/dev/null 2>&1
+        ufw allow from "$PROMETHEUS_IP" to any port "${NODE_EXPORTER_PORT}" proto tcp \
+            comment 'node_exporter (Prometheus)' >/dev/null 2>&1
+        log_success "UFW: node_exporter $NODE_EXPORTER_PORT → только $PROMETHEUS_IP"
     fi
 
     ufw --force enable >/dev/null 2>&1
@@ -663,15 +694,124 @@ step_firewall() {
     log_success "Fail2ban: enabled"
 }
 
+step_node_exporter() {
+    if [[ -z "${PROMETHEUS_IP:-}" ]]; then
+        log_step "9/11 — node_exporter (пропущен — Prometheus IP не указан)"
+        return 0
+    fi
+
+    log_step "9/11 — node_exporter v${NODE_EXPORTER_VERSION} (TLS)"
+
+    # ── Архитектура ──────────────────────────────────────────────
+    local arch
+    case "$(uname -m)" in
+        x86_64)  arch="amd64" ;;
+        aarch64) arch="arm64" ;;
+        armv7l)  arch="armv7" ;;
+        *)
+            log_error "Неизвестная архитектура: $(uname -m) — node_exporter пропущен"
+            return 1
+            ;;
+    esac
+
+    local ver="${NODE_EXPORTER_VERSION}"
+    local pkg="node_exporter-${ver}.linux-${arch}"
+    local base="https://github.com/prometheus/node_exporter/releases/download/v${ver}"
+    local tmp
+    tmp=$(mktemp -d)
+
+    # ── Скачивание + проверка sha256 ─────────────────────────────
+    log_info "Скачиваю ${pkg}.tar.gz..."
+    if ! wget -q -O "${tmp}/${pkg}.tar.gz" "${base}/${pkg}.tar.gz"; then
+        log_error "Не удалось скачать node_exporter — пропускаю"
+        rm -rf "$tmp"
+        return 1
+    fi
+    wget -q -O "${tmp}/sha256sums.txt" "${base}/sha256sums.txt" || true
+    if [[ -s "${tmp}/sha256sums.txt" ]]; then
+        ( cd "$tmp" && grep " ${pkg}.tar.gz\$" sha256sums.txt | sha256sum -c - >/dev/null 2>&1 ) \
+            && log_success "sha256 проверен" \
+            || { log_error "sha256 mismatch — установка прервана"; rm -rf "$tmp"; return 1; }
+    else
+        log_warning "Не удалось получить sha256sums.txt — пропускаю проверку"
+    fi
+
+    # ── Установка бинаря ─────────────────────────────────────────
+    tar xzf "${tmp}/${pkg}.tar.gz" -C "$tmp"
+    install -m 0755 "${tmp}/${pkg}/node_exporter" /usr/local/bin/node_exporter
+    rm -rf "$tmp"
+    log_success "Бинарь: /usr/local/bin/node_exporter ($(node_exporter --version 2>&1 | head -1 | awk '{print $3}'))"
+
+    # ── Self-signed TLS сертификат ───────────────────────────────
+    mkdir -p "$NODE_EXPORTER_DIR"
+    local server_ip
+    server_ip=$(ip route get 1.1.1.1 2>/dev/null | awk '/src/{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' | head -1)
+    if [[ ! -f "${NODE_EXPORTER_DIR}/node_exporter.crt" ]]; then
+        openssl req -x509 -nodes -newkey rsa:2048 \
+            -keyout "${NODE_EXPORTER_DIR}/node_exporter.key" \
+            -out "${NODE_EXPORTER_DIR}/node_exporter.crt" \
+            -days 3650 -subj "/CN=$(hostname)" \
+            ${server_ip:+-addext "subjectAltName=IP:${server_ip}"} >/dev/null 2>&1
+        chmod 600 "${NODE_EXPORTER_DIR}/node_exporter.key"
+        chmod 644 "${NODE_EXPORTER_DIR}/node_exporter.crt"
+        log_success "Self-signed cert сгенерирован (CN=$(hostname)${server_ip:+, SAN IP:${server_ip}})"
+    else
+        log_info "Сертификат уже существует — пропускаю генерацию"
+    fi
+
+    # ── web-config.yml (exporter-toolkit TLS) ────────────────────
+    cat > "${NODE_EXPORTER_DIR}/web-config.yml" << EOF
+tls_server_config:
+  cert_file: ${NODE_EXPORTER_DIR}/node_exporter.crt
+  key_file: ${NODE_EXPORTER_DIR}/node_exporter.key
+  min_version: TLS12
+EOF
+
+    # ── systemd unit (запуск от root) ────────────────────────────
+    cat > /etc/systemd/system/node_exporter.service << EOF
+[Unit]
+Description=Prometheus Node Exporter (TLS)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/node_exporter \\
+    --web.listen-address=:${NODE_EXPORTER_PORT} \\
+    --web.config.file=${NODE_EXPORTER_DIR}/web-config.yml \\
+    --collector.systemd \\
+    --collector.processes
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable node_exporter >/dev/null 2>&1
+    systemctl restart node_exporter
+
+    sleep 2
+    if systemctl is-active --quiet node_exporter; then
+        log_success "node_exporter активен: https://${server_ip:-<IP>}:${NODE_EXPORTER_PORT}/metrics"
+        log_info "Prometheus scrape: scheme=https, tls_config.insecure_skip_verify=true"
+    else
+        log_warning "node_exporter не запустился — проверь: journalctl -u node_exporter -n 30"
+    fi
+}
+
 step_logrotate() {
-    log_step "9/10 — Директории и логирование"
+    log_step "10/11 — Директории и логирование"
 
     mkdir -p /opt/remnanode /var/log/remnanode
 
     cat > /etc/logrotate.d/remnanode << 'EOF'
 /var/log/remnanode/*.log {
     daily
-    size 50M
+    maxsize 50M
     rotate 5
     compress
     missingok
@@ -685,14 +825,17 @@ EOF
 
 step_remnanode() {
     if [[ "${DEPLOY_REMNANODE}" != "true" ]]; then
-        log_step "10/10 — Remnanode (пропущен)"
+        log_step "11/11 — Remnanode (пропущен)"
         return 0
     fi
 
-    log_step "10/10 — Деплой Remnanode"
+    log_step "11/11 — Деплой Remnanode"
 
     local REMNANODE_DIR="/opt/remnanode"
     mkdir -p "${REMNANODE_DIR}"
+    # Директории для сертификатов и сокетов (монтируются в контейнер)
+    mkdir -p "${CERT_DIR}"
+    mkdir -p "${SOCKET_DIR}"
 
     # ── Скачиваем zapret.dat ─────────────────────────────────────
     log_info "Скачиваю zapret.dat..."
@@ -703,6 +846,9 @@ step_remnanode() {
         || log_warning "Не удалось скачать zapret.dat — продолжаю без него"
 
     # ── Создаём docker-compose.yml ───────────────────────────────
+    # volumes:
+    #   /dev/shm     — общая tmpfs для unix-сокетов (HAProxy ↔ Xray)
+    #   /opt/nginx   — сертификаты для Hysteria2 / Reality own-cert (ro)
     cat > "${REMNANODE_DIR}/docker-compose.yml" << EOF
 services:
   remnanode:
@@ -723,9 +869,12 @@ services:
     volumes:
       - /var/log/remnanode:/var/log/remnanode
       - /opt/remnawave/xray/share/zapret.dat:/usr/local/bin/zapret.dat
+      - ${SOCKET_DIR}:${SOCKET_DIR}
+      - ${CERT_DIR}:${CERT_DIR}:ro
 EOF
 
     log_success "docker-compose.yml → ${REMNANODE_DIR}/docker-compose.yml"
+    log_info "Volumes: сокеты ${SOCKET_DIR} (rw), сертификаты ${CERT_DIR} (ro)"
 
     # ── Pull и запуск ────────────────────────────────────────────
     log_info "Pulling remnawave/node:latest..."
@@ -923,11 +1072,15 @@ print_summary() {
     fi
     echo -e "  ✅ DNS over TLS"
     echo -e "  ✅ UFW + Fail2ban"
+    if [[ -n "${PROMETHEUS_IP:-}" ]]; then
+        echo -e "  ✅ node_exporter v${NODE_EXPORTER_VERSION} (TLS, порт ${NODE_EXPORTER_PORT})"
+    fi
     echo -e "  ✅ Logrotate"
     if [[ "${DEPLOY_REMNANODE}" == "true" ]]; then
         echo -e "  ✅ Remnanode развёрнут и запущен"
         echo -e "     docker-compose.yml → /opt/remnanode/"
         echo -e "     zapret.dat → /opt/remnawave/xray/share/"
+        echo -e "     volumes: сокеты ${SOCKET_DIR} (rw), сертификаты ${CERT_DIR} (ro)"
     fi
     echo ""
     echo -e "${YELLOW}Управление remnanode:${NC}"
@@ -941,6 +1094,10 @@ print_summary() {
     echo -e "  cat /sys/module/nf_conntrack/parameters/hashsize   # → ${hashsize}"
     echo -e "  cat /sys/class/net/${IFACE}/queues/rx-0/rps_cpus   # → $(calc_rps_mask "$CPUS")"
     echo -e "  ulimit -n                                           # → 1048576"
+    if [[ -n "${PROMETHEUS_IP:-}" ]]; then
+        echo -e "  systemctl status node_exporter                     # → active"
+        echo -e "  curl -sk https://localhost:${NODE_EXPORTER_PORT}/metrics | head  # → метрики"
+    fi
     echo ""
 
     read -rp "Перезагрузить сервер сейчас? (y/n): " REBOOT_CONFIRM
@@ -1001,6 +1158,7 @@ main() {
     step_swap
     step_dns
     step_firewall
+    step_node_exporter
     step_logrotate
     step_remnanode
 
